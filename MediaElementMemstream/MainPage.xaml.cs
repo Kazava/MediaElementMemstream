@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices.WindowsRuntime;
+using System.Threading.Tasks;
 using Windows.Foundation;
 using Windows.Foundation.Collections;
 using Windows.Media.Core;
@@ -17,6 +18,7 @@ using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml.Media;
 using Windows.UI.Xaml.Navigation;
 using Debug = System.Diagnostics.Debug;
+using System.Runtime.InteropServices.WindowsRuntime;
 
 // The Blank Page item template is documented at http://go.microsoft.com/fwlink/?LinkId=402352&clcid=0x409
 
@@ -30,6 +32,9 @@ namespace MediaElementMemstream
         VideoStreamDescriptor videoDesc;
         private Windows.Media.Core.MediaStreamSource mss = null;
         Windows.Storage.Streams.Buffer buff;
+        MpegTS.BufferExtractor extractor;
+        private volatile bool running;
+        System.Threading.AutoResetEvent threadSync;
 
         public MainPage()
         {
@@ -37,7 +42,7 @@ namespace MediaElementMemstream
 
             var videoProperties = VideoEncodingProperties.CreateH264();//.CreateUncompressed(MediaEncodingSubtypes.H264, 720, 480);
             var vd = VideoEncodingProperties.CreateUncompressed(MediaEncodingSubtypes.H264, 720, 480);
-            videoDesc = new VideoStreamDescriptor(videoProperties);
+            videoDesc = new VideoStreamDescriptor(vd);
             videoDesc.EncodingProperties.FrameRate.Numerator = 29970;
             videoDesc.EncodingProperties.FrameRate.Denominator = 1000;
             videoDesc.EncodingProperties.Width = 720;
@@ -51,6 +56,8 @@ namespace MediaElementMemstream
             mss.SampleRendered += Mss_SampleRendered;
 
             buff = new Windows.Storage.Streams.Buffer(1024*4);
+
+            threadSync = new System.Threading.AutoResetEvent(false);
         }
 
         private void Mss_SampleRendered(MediaStreamSource sender, MediaStreamSourceSampleRenderedEventArgs args)
@@ -58,8 +65,13 @@ namespace MediaElementMemstream
             Debug.WriteLine("sample rendered event");
         }
 
+        bool gotT0 = false;
+        private TimeSpan T0;
+        int frameCount = 0;
+
         private void Mss_SampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
         {
+            Debug.WriteLine("requesting sample");
             MediaStreamSourceSampleRequest request = args.Request;
 
             // check if the sample requested byte offset is within the file size
@@ -69,19 +81,46 @@ namespace MediaElementMemstream
                 MediaStreamSourceSampleRequestDeferral deferal = request.GetDeferral();
 
                 //block here for signal from mpegTS parser that a sample is ready
+                //if (extractor.SampleCount == 0)
+                //    threadSync.WaitOne();
 
                 //dequeue the raw sample here
+                MpegTS.VideoSample rawSample = null;
+
+                do
+                {
+                    threadSync.WaitOne();
+                    rawSample = extractor.DequeueNextSample(false);
+                }
+                while (rawSample == null || extractor.SampleCount == 0);
+
+                if(!gotT0)
+                {
+                    gotT0 = true;
+                    T0 = new TimeSpan(333667);
+                    //T0.TotalMilliseconds = 33.3667;
+                }
 
                 //check max size of current buffer, increase if needed.
-                if (buff.Length < 1)
-                    buff = new Windows.Storage.Streams.Buffer( 1 );
+                if (buff.Capacity < rawSample.Length)
+                    buff = new Windows.Storage.Streams.Buffer( (uint)rawSample.Length );
 
                 //create our sample here may need to keep initial time stamp for relative time?
-                var sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(0));
+                var sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(T0.Ticks * frameCount));
+
+                var bStream = sample.Buffer.AsStream();
+                bStream.Position = 0;
 
                 //write the raw sample to the reqest sample stream;
+                rawSample.WriteToStream(bStream);
 
-                //inputStream = mssStream.GetInputStreamAt(byteOffset);
+                sample.Buffer.Length = (uint)rawSample.Length;
+                //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
+                sample.Duration = T0;
+                sample.KeyFrame = true;
+
+                //
+                ++frameCount;
 
                 // create the MediaStreamSample and assign to the request object. 
                 // You could also create the MediaStreamSample using createFromBuffer(...)
@@ -97,12 +136,59 @@ namespace MediaElementMemstream
                 request.Sample = sample;
                 deferal.Complete();
             }
+
+            Debug.WriteLine("exit request sample");
         }
 
         private void mss_Starting(MediaStreamSource sender, MediaStreamSourceStartingEventArgs args)
         {
+            extractor = new MpegTS.BufferExtractor();
+
+            running = true;
+            frameCount = 0;
             //_sampleGenerator.Initialize(_mss, videoDesc);
             args.Request.SetActualStartPosition(new TimeSpan(0));
+
+            Task.Run(() => RunreadFromFile());
+        }
+
+        private async void RunreadFromFile()
+        {
+            var dir = (await KnownFolders.RemovableDevices.GetFoldersAsync()).ToList();
+            var f = await dir.FirstOrDefault(file => file.Name == @"D:\").GetFileAsync(@"extSdCard\Video_2014_5_7__15_33_44.mpg");
+
+            var fStream = (await f.OpenReadAsync()).AsStream();//let's use a standard stream
+            long eof = fStream.Length - MpegTS.TsPacket.PacketLength;
+            byte[] b;
+
+            do
+            {
+                if (fStream.Position < eof)
+                {
+                    b = extractor.GetBuffer();
+
+                    await fStream.ReadAsync(b, 0, b.Length).ConfigureAwait(false);
+
+                    if(!extractor.AddRaw(b))
+                    {//the chunk we read was not mpegTS data, or we need to find the sync byte
+                        int syncbytePos = MpegTS.TsPacket.PacketLength - b.ToList().IndexOf(MpegTS.TsPacket.SyncByte);
+
+                        if(syncbytePos < MpegTS.TsPacket.PacketLength)
+                            fStream.Position -= syncbytePos;//try to re-sync the stream cursor
+                    }
+
+                    if (extractor.SampleCount > 0)
+                    {
+                        threadSync.Set();//unblock decoder thread
+                        if (extractor.SampleCount > 1)
+                            await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
+                    }
+                }
+                else
+                    fStream.Position = 0;//go to start of file
+
+
+            } while (running);
         }
 
         private async void button_Click(object sender, RoutedEventArgs e)

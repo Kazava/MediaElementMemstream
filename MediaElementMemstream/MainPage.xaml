@@ -8,8 +8,8 @@
     mc:Ignorable="d">
 
     <Grid Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" Margin="0,0,-183,0">
-        <Button x:Name="button" Content="Button" HorizontalAlignment="Left" Height="100" Margin="129,530,0,0" VerticalAlignment="Top" Width="100" Click="button_Click"/>
-        <MediaElement x:Name="mediaElement" HorizontalAlignment="Left" Height="348" Margin="7.101,72.651,0,0" VerticalAlignment="Top" Width="350" Stretch="Fill" Source="D:\extSdCard\Video_2014_5_6__16_51_56.mp4" RenderTransformOrigin="0.5,0.5" UseLayoutRounding="False" d:LayoutRounding="Auto"/>
+        <Button x:Name="button" Content="Button" HorizontalAlignment="Left" Height="100" Width="100" Margin="129,530,0,0" VerticalAlignment="Top" Click="button_Click"/>
+        <MediaElement x:Name="mediaElement" HorizontalAlignment="Left" Height="480" Width="720" Margin="7.101,72.651,0,0" VerticalAlignment="Top" Stretch="Fill" Source="D:\extSdCard\Video_2014_5_6__16_51_56.mp4" RenderTransformOrigin="0.5,0.5" UseLayoutRounding="False" d:LayoutRounding="Auto"/>
 
     </Grid>
 </Page>
