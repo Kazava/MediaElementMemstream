@@ -20,7 +20,9 @@ using Windows.UI.Xaml.Navigation;
 using Debug = System.Diagnostics.Debug;
 using System.Runtime.InteropServices.WindowsRuntime;
 
-// The Blank Page item template is documented at http://go.microsoft.com/fwlink/?LinkId=402352&clcid=0x409
+//this link has some useful info
+//https://social.msdn.microsoft.com/Forums/en-US/b169961a-0fa6-40aa-9c2d-55cc72e5db59/how-to-trigger-mediastreamsourcesamplerequested-event-when-the-h264-data-is-received-from-our?forum=wpdevelop
+
 
 namespace MediaElementMemstream
 {
@@ -34,7 +36,6 @@ namespace MediaElementMemstream
         Windows.Storage.Streams.Buffer buff;
         MpegTS.BufferExtractor extractor;
         private volatile bool running;
-        System.Threading.AutoResetEvent threadSync;
 
         public MainPage()
         {
@@ -57,7 +58,6 @@ namespace MediaElementMemstream
 
             buff = new Windows.Storage.Streams.Buffer(1024*4);
 
-            threadSync = new System.Threading.AutoResetEvent(false);
         }
 
         private void Mss_SampleRendered(MediaStreamSource sender, MediaStreamSourceSampleRenderedEventArgs args)
@@ -67,10 +67,15 @@ namespace MediaElementMemstream
 
         bool gotT0 = false;
         private TimeSpan T0;
-        int frameCount = 0;
+        uint frameCount = 0;
+        MediaStreamSample emptySample = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer(0), new TimeSpan(0));
 
+        
         private void Mss_SampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
         {
+            if (!(args.Request.StreamDescriptor is VideoStreamDescriptor))
+                return;
+
             Debug.WriteLine("requesting sample");
             MediaStreamSourceSampleRequest request = args.Request;
 
@@ -87,12 +92,20 @@ namespace MediaElementMemstream
                 //dequeue the raw sample here
                 MpegTS.VideoSample rawSample = null;
 
-                do
-                {
-                    threadSync.WaitOne();
+                //do
+                //{
+                //    threadSync.WaitOne();
                     rawSample = extractor.DequeueNextSample(false);
+                //}
+                //while (rawSample == null || extractor.SampleCount == 0);
+                if (rawSample == null)
+
+                {
+                    request.Sample = emptySample;
+                    deferal.Complete();
+
+                    return;
                 }
-                while (rawSample == null || extractor.SampleCount == 0);
 
                 if(!gotT0)
                 {
@@ -115,9 +128,10 @@ namespace MediaElementMemstream
                 rawSample.WriteToStream(bStream);
 
                 sample.Buffer.Length = (uint)rawSample.Length;
+                Debug.WriteLine("sample length: {0}", rawSample.Length);
                 //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
                 sample.Duration = T0;
-                sample.KeyFrame = true;
+                sample.KeyFrame = rawSample.Length > 3000;
 
                 //
                 ++frameCount;
