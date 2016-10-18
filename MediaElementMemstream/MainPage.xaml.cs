@@ -193,7 +193,6 @@ namespace MediaElementMemstream
 
                     if (extractor.SampleCount > 0)
                     {
-                        threadSync.Set();//unblock decoder thread
                         if (extractor.SampleCount > 1)
                             await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
                     }
