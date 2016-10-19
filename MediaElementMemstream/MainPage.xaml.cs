@@ -61,6 +61,7 @@ namespace MediaElementMemstream
             mss.SampleRendered += Mss_SampleRendered;
 
             buff = new Windows.Storage.Streams.Buffer(1024*4);
+            bStream = buff.AsStream();
 
             threadSync = new System.Threading.AutoResetEvent(false);
 
@@ -77,8 +78,9 @@ namespace MediaElementMemstream
         private TimeSpan T0;
         uint frameCount = 0;
         MediaStreamSample emptySample = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer(0), new TimeSpan(0));
+        Stream bStream;
+        MediaStreamSample sample;
 
-        
         private void Mss_SampleRequested(MediaStreamSource sender, MediaStreamSourceSampleRequestedEventArgs args)
         {
             if (!(args.Request.StreamDescriptor is VideoStreamDescriptor))
@@ -107,7 +109,6 @@ namespace MediaElementMemstream
                     while (rawSample == null || extractor.SampleCount == 0);
                 }
                 //else if (rawSample == null)
-
                 //{
                 //    request.Sample = emptySample;
                 //    deferal.Complete();
@@ -124,12 +125,16 @@ namespace MediaElementMemstream
 
                 //check max size of current buffer, increase if needed.
                 if (buff.Capacity < rawSample.Length)
-                    buff = new Windows.Storage.Streams.Buffer( (uint)rawSample.Length );
+                {
+                    buff = new Windows.Storage.Streams.Buffer((uint)rawSample.Length);
+                    bStream.Dispose();
+                    //bStream = sample.Buffer.AsStream();
+                    bStream = buff.AsStream();
+                }
 
                 //create our sample here may need to keep initial time stamp for relative time?
-                var sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(T0.Ticks * frameCount));
+                sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(T0.Ticks * frameCount));
 
-                var bStream = sample.Buffer.AsStream();
                 bStream.Position = 0;
 
                 //write the raw sample to the reqest sample stream;
