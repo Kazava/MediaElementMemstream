@@ -35,7 +35,11 @@ namespace MediaElementMemstream
         private Windows.Media.Core.MediaStreamSource mss = null;
         Windows.Storage.Streams.Buffer buff;
         MpegTS.BufferExtractor extractor;
+        System.Threading.AutoResetEvent threadSync;
+
         private volatile bool running;
+
+
 
         public MainPage()
         {
@@ -58,14 +62,18 @@ namespace MediaElementMemstream
 
             buff = new Windows.Storage.Streams.Buffer(1024*4);
 
+            threadSync = new System.Threading.AutoResetEvent(false);
+
         }
 
         private void Mss_SampleRendered(MediaStreamSource sender, MediaStreamSourceSampleRenderedEventArgs args)
         {
+            foundKeyFrame = true;
+
             Debug.WriteLine("sample rendered event");
         }
 
-        bool gotT0 = false;
+        bool foundKeyFrame, gotT0 = false;
         private TimeSpan T0;
         uint frameCount = 0;
         MediaStreamSample emptySample = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer(0), new TimeSpan(0));
@@ -79,35 +87,35 @@ namespace MediaElementMemstream
             Debug.WriteLine("requesting sample");
             MediaStreamSourceSampleRequest request = args.Request;
 
-            // check if the sample requested byte offset is within the file size
+            MpegTS.VideoSample rawSample = null;
+            MediaStreamSourceSampleRequestDeferral deferal = request.GetDeferral();
 
-            //if (byteOffset + sampleSize <= mssStream.Size)
+            try
             {
-                MediaStreamSourceSampleRequestDeferral deferal = request.GetDeferral();
-
                 //block here for signal from mpegTS parser that a sample is ready
                 //if (extractor.SampleCount == 0)
                 //    threadSync.WaitOne();
 
                 //dequeue the raw sample here
-                MpegTS.VideoSample rawSample = null;
-
-                //do
-                //{
-                //    threadSync.WaitOne();
-                    rawSample = extractor.DequeueNextSample(false);
-                //}
-                //while (rawSample == null || extractor.SampleCount == 0);
-                if (rawSample == null)
-
+                //if (!foundKeyFrame)
                 {
-                    request.Sample = emptySample;
-                    deferal.Complete();
-
-                    return;
+                    do
+                    {
+                        threadSync.WaitOne();
+                        rawSample = extractor.DequeueNextSample(false);
+                    }
+                    while (rawSample == null || extractor.SampleCount == 0);
                 }
+                //else if (rawSample == null)
 
-                if(!gotT0)
+                //{
+                //    request.Sample = emptySample;
+                //    deferal.Complete();
+
+                //    return;
+                //}
+
+                if (!gotT0)
                 {
                     gotT0 = true;
                     T0 = new TimeSpan(333667);
@@ -148,22 +156,37 @@ namespace MediaElementMemstream
                 //byteOffset += sampleSize;
                 //timeOffset = timeOffset.Add(sampleDuration);
                 request.Sample = sample;
+            }
+            catch(Exception ex)
+            {
+                var exStr = ex.ToString();
+            }
+            finally
+            {
                 deferal.Complete();
+
             }
 
             Debug.WriteLine("exit request sample");
         }
 
+        System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
+
         private void mss_Starting(MediaStreamSource sender, MediaStreamSourceStartingEventArgs args)
         {
             extractor = new MpegTS.BufferExtractor();
-
             running = true;
+
+            //sw.Restart();
+
+            Task.Run(() => RunreadFromFile());
+
+            threadSync.WaitOne();//make the codec wait on us to start?
+
             frameCount = 0;
             //_sampleGenerator.Initialize(_mss, videoDesc);
             args.Request.SetActualStartPosition(new TimeSpan(0));
 
-            Task.Run(() => RunreadFromFile());
         }
 
         private async void RunreadFromFile()
@@ -180,6 +203,8 @@ namespace MediaElementMemstream
                 if (fStream.Position < eof)
                 {
                     b = extractor.GetBuffer();
+                    //var ts = sw.Elapsed;
+                    //Debug.WriteLine("reading sample from file {0}", ts);
 
                     await fStream.ReadAsync(b, 0, b.Length).ConfigureAwait(false);
 
@@ -193,6 +218,8 @@ namespace MediaElementMemstream
 
                     if (extractor.SampleCount > 0)
                     {
+                        threadSync.Set();
+
                         if (extractor.SampleCount > 1)
                             await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
                     }
