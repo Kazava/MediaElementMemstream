@@ -23,6 +23,13 @@ using System.Runtime.InteropServices.WindowsRuntime;
 //this link has some useful info
 //https://social.msdn.microsoft.com/Forums/en-US/b169961a-0fa6-40aa-9c2d-55cc72e5db59/how-to-trigger-mediastreamsourcesamplerequested-event-when-the-h264-data-is-received-from-our?forum=wpdevelop
 
+//more reference links
+//http://www.itu.int/rec/T-REC-H.264-201304-S
+
+//http://stackoverflow.com/questions/1685494/what-does-this-h264-nal-header-mean 
+
+//http://stackoverflow.com/questions/1957427/detect-mpeg4-h264-i-frame-idr-in-rtp-stream
+
 
 namespace MediaElementMemstream
 {
@@ -47,7 +54,7 @@ namespace MediaElementMemstream
 
             var videoProperties = VideoEncodingProperties.CreateH264();//.CreateUncompressed(MediaEncodingSubtypes.H264, 720, 480);
             var vd = VideoEncodingProperties.CreateUncompressed(MediaEncodingSubtypes.H264, 720, 480);
-            videoDesc = new VideoStreamDescriptor(vd);
+            videoDesc = new VideoStreamDescriptor(videoProperties);
             videoDesc.EncodingProperties.FrameRate.Numerator = 29970;
             videoDesc.EncodingProperties.FrameRate.Denominator = 1000;
             videoDesc.EncodingProperties.Width = 720;
@@ -60,11 +67,24 @@ namespace MediaElementMemstream
             mss.SampleRequested += Mss_SampleRequested;
             mss.SampleRendered += Mss_SampleRendered;
 
+            //initialize some buffers
             buff = new Windows.Storage.Streams.Buffer(1024*4);
             bStream = buff.AsStream();
 
+            //this seems needed for start-up
             threadSync = new System.Threading.AutoResetEvent(false);
 
+            //get the frame time in ms
+            double ms = 1000.0 * videoDesc.EncodingProperties.FrameRate.Denominator / videoDesc.EncodingProperties.FrameRate.Numerator;
+            //get the frame time in ticks
+            T0 = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
+
+            //our demuxer
+            extractor = new MpegTS.BufferExtractor();
+            running = true;
+
+            //give the file IO a head start
+            Task.Run(() => RunreadFromFile());
         }
 
         private void Mss_SampleRendered(MediaStreamSource sender, MediaStreamSourceSampleRenderedEventArgs args)
@@ -74,7 +94,7 @@ namespace MediaElementMemstream
             Debug.WriteLine("sample rendered event");
         }
 
-        bool foundKeyFrame, gotT0 = false;
+        bool lastFrame, foundKeyFrame, gotT0 = false;
         private TimeSpan T0;
         uint frameCount = 0;
         MediaStreamSample emptySample = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer(0), new TimeSpan(0));
@@ -99,7 +119,7 @@ namespace MediaElementMemstream
                 //    threadSync.WaitOne();
 
                 //dequeue the raw sample here
-                //if (!foundKeyFrame)
+                if (!foundKeyFrame)
                 {
                     do
                     {
@@ -108,20 +128,25 @@ namespace MediaElementMemstream
                     }
                     while (rawSample == null || extractor.SampleCount == 0);
                 }
-                //else if (rawSample == null)
-                //{
-                //    request.Sample = emptySample;
-                //    deferal.Complete();
-
-                //    return;
-                //}
-
-                if (!gotT0)
+                else 
                 {
-                    gotT0 = true;
-                    T0 = new TimeSpan(333667);
-                    //T0.TotalMilliseconds = 33.3667;
+                    if(extractor.SampleCount > 0)
+                        rawSample = extractor.DequeueNextSample(false);
+
+                    if (rawSample == null)
+                    {
+                        request.Sample = emptySample;
+                        deferal.Complete();
+
+                        return;
+                    }
                 }
+
+                //if (!gotT0)
+                //{
+                //    gotT0 = true;
+                //    //T0.TotalMilliseconds = 33.3667;
+                //}
 
                 //check max size of current buffer, increase if needed.
                 if (buff.Capacity < rawSample.Length)
@@ -144,9 +169,18 @@ namespace MediaElementMemstream
                 Debug.WriteLine("sample length: {0}", rawSample.Length);
                 //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
                 sample.Duration = T0;
-                sample.KeyFrame = rawSample.Length > 3000;
+                sample.KeyFrame = ScanForKeyframe(bStream);//rawSample.Length > 3000;
 
-                //
+                //not sure if this is correct...
+                sample.Discontinuous = !lastFrame;
+
+                //this just tells us if the MpegTS Continuity Counter 
+                //for all Mpeg packets in the sample were in order. (0-15)
+                lastFrame = rawSample.IsComplete;
+
+                    //if (!foundKeyFrame)
+                    //    sample = emptySample;
+                    //else
                 ++frameCount;
 
                 // create the MediaStreamSample and assign to the request object. 
@@ -175,23 +209,66 @@ namespace MediaElementMemstream
             Debug.WriteLine("exit request sample");
         }
 
+        enum NalTypes: byte
+        {
+            KeyFrame = 0x05,
+            SPS = 0x07,
+            PPS = 0x08,
+        }
+
+        private bool ScanForKeyframe(Stream bStream)
+        {
+            List<int> nali = new List<int>(8);
+
+            bStream.Position = 0;
+
+            int b;
+
+            for(int i = 0; i<bStream.Length; ++i)
+            {
+                b = bStream.ReadByte();
+
+                if (b == 0x00)
+                {
+                    bStream.Position += 2;
+
+                    if (bStream.ReadByte() == 0x01)
+                    {
+                        i = (int)bStream.Position;
+
+                        var type = (NalTypes)(bStream.ReadByte() & 0x0F);
+
+                        Debug.WriteLine("found NAL type: {0}", type);
+
+                        if (type == NalTypes.KeyFrame)
+                        {
+                            bStream.Position = 0 ;
+                            var buf = new byte[bStream.Length-bStream.Position];
+                            bStream.Read(buf, 0, buf.Length);
+                            return true;
+                        }
+
+                        nali.Add(i);
+                    }
+                }
+                //else
+                //    i += 2;
+            }
+
+            Debug.WriteLine("nal count: {0}", nali.Count);
+
+            return false;
+        }
+
         System.Diagnostics.Stopwatch sw = new System.Diagnostics.Stopwatch();
 
         private void mss_Starting(MediaStreamSource sender, MediaStreamSourceStartingEventArgs args)
         {
-            extractor = new MpegTS.BufferExtractor();
-            running = true;
-
-            //sw.Restart();
-
-            Task.Run(() => RunreadFromFile());
-
-            threadSync.WaitOne();//make the codec wait on us to start?
+            //threadSync.WaitOne();//make the codec wait on us to start?
 
             frameCount = 0;
             //_sampleGenerator.Initialize(_mss, videoDesc);
             args.Request.SetActualStartPosition(new TimeSpan(0));
-
         }
 
         private async void RunreadFromFile()
@@ -215,6 +292,8 @@ namespace MediaElementMemstream
 
                     if(!extractor.AddRaw(b))
                     {//the chunk we read was not mpegTS data, or we need to find the sync byte
+                        Debug.WriteLine("re-syncing file stream...");
+
                         int syncbytePos = MpegTS.TsPacket.PacketLength - b.ToList().IndexOf(MpegTS.TsPacket.SyncByte);
 
                         if(syncbytePos < MpegTS.TsPacket.PacketLength)
@@ -225,7 +304,7 @@ namespace MediaElementMemstream
                     {
                         threadSync.Set();
 
-                        if (extractor.SampleCount > 1)
+                        while (extractor.SampleCount > 3)
                             await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
                     }
                 }
