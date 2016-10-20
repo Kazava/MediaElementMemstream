@@ -169,7 +169,7 @@ namespace MediaElementMemstream
                 Debug.WriteLine("sample length: {0}", rawSample.Length);
                 //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
                 sample.Duration = T0;
-                sample.KeyFrame = ScanForKeyframe(bStream);//rawSample.Length > 3000;
+                sample.KeyFrame = ScanForKeyframe(bStream);//rawSample.Length > 3000;//
 
                 //not sure if this is correct...
                 sample.Discontinuous = !lastFrame;
