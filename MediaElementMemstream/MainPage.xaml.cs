@@ -47,7 +47,8 @@ namespace MediaElementMemstream
         System.Threading.AutoResetEvent threadSync;
 
         private volatile bool running;
-        private List<MediaStreamSample> SampleRecycler;
+        private List<Windows.Storage.Streams.Buffer> SampleRecycler;
+        //private List<MediaStreamSample> SampleRecycler;
         //System.Collections.Concurrent.<> bag;
         //private System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample> SampleQ;
         Queue<MediaStreamSample> SampleQ;
@@ -85,7 +86,7 @@ namespace MediaElementMemstream
             //get the frame time in ticks
             Tf = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
 
-            SampleRecycler = new List<MediaStreamSample>(10);
+            SampleRecycler = new List<Windows.Storage.Streams.Buffer>(10);
             SampleQ = new Queue<MediaStreamSample>();
             //SampleQ = new System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample>();
 
@@ -179,6 +180,21 @@ namespace MediaElementMemstream
                 //else
                 bool gotSam = false;
                 MediaStreamSample s;
+
+                int samplCount = 0;
+
+                do
+                {
+
+                    lock (SampleQ) samplCount = SampleQ.Count;
+
+                    Debug.WriteLine("# samples: {0}", samplCount);
+
+                    if (samplCount == 0)
+                        threadSync.WaitOne();
+                }
+                while (samplCount == 0);
+
                 lock (SampleQ) s = SampleQ.Dequeue();
                 //do
                 //{
@@ -246,25 +262,30 @@ namespace MediaElementMemstream
 
         private MediaStreamSample GetSample(int length)
         {
+            Windows.Storage.Streams.Buffer buff = null;
             MediaStreamSample samp = null;
 
             lock (SampleRecycler)
             {
                 if(SampleRecycler.Count > 0)
-                    samp = SampleRecycler.FirstOrDefault(smpl => smpl.Buffer.Capacity >= length);
+                    buff = SampleRecycler.FirstOrDefault(buf => buf.Capacity >= length);
             }
-            if(samp == null)
+            if(buff == null)
             {
                 //create a new sample obj
-                samp = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer((uint)length),
-                                                        new TimeSpan(0));//default timespan
+                buff = new Windows.Storage.Streams.Buffer((uint)length);
+                //samp = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer((uint)length),
+                //                                        new TimeSpan(0));//default timespan
 
-                samp.Processed += SampleProcessed;//make sure to recycle our samples/buffers
+                //samp.Processed += SampleProcessed;//make sure to recycle our samples/buffers
             }
             else
             {
-                lock (SampleRecycler) SampleRecycler.Remove(samp);
+                lock (SampleRecycler) SampleRecycler.Remove(buff);
             }
+
+            samp = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(0));
+            samp.Processed += SampleProcessed;//make sure to recycle our samples/buffers
 
             return samp;
         }
@@ -273,8 +294,7 @@ namespace MediaElementMemstream
         {
             Debug.WriteLine("sample proc evnt");
 
-            lock (SampleRecycler)
-                SampleRecycler.Add(sender);
+            lock (SampleRecycler) SampleRecycler.Add(sender.Buffer);
         }
 
         enum NalTypes: byte
@@ -434,10 +454,11 @@ namespace MediaElementMemstream
                                 vidSam.Duration = Tf;
 
                                 SampleQ.Enqueue(vidSam);
+                                threadSync.Set();
 
                             }
                             else
-                                lock(SampleRecycler) SampleRecycler.Add(vidSam);
+                                lock(SampleRecycler) SampleRecycler.Add(vidSam.Buffer);
                         }
                         else
                         {
