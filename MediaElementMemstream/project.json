@@ -1,5 +1,6 @@
 ﻿{
   "dependencies": {
+    "AsyncErrorHandler.Fody": "1.0.11",
     "Microsoft.NETCore.UniversalWindowsPlatform": "5.1.0"
   },
   "frameworks": {
