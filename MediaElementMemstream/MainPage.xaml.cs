@@ -30,6 +30,8 @@ using System.Runtime.InteropServices.WindowsRuntime;
 
 //http://stackoverflow.com/questions/1957427/detect-mpeg4-h264-i-frame-idr-in-rtp-stream
 
+//another source reference:
+//https://code.msdn.microsoft.com/MediaStreamSource-media-dfd55dff#content
 
 namespace MediaElementMemstream
 {
@@ -45,11 +47,13 @@ namespace MediaElementMemstream
         System.Threading.AutoResetEvent threadSync;
 
         private volatile bool running;
-
+        private List<MediaStreamSample> SampleRecycler;
+        //System.Collections.Concurrent.<> bag;
 
 
         public MainPage()
         {
+            
             this.InitializeComponent();
 
             var videoProperties = VideoEncodingProperties.CreateH264();//.CreateUncompressed(MediaEncodingSubtypes.H264, 720, 480);
@@ -77,7 +81,9 @@ namespace MediaElementMemstream
             //get the frame time in ms
             double ms = 1000.0 * videoDesc.EncodingProperties.FrameRate.Denominator / videoDesc.EncodingProperties.FrameRate.Numerator;
             //get the frame time in ticks
-            T0 = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
+            Tf = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
+
+            SampleRecycler = new List<MediaStreamSample>(10);
 
             //our demuxer
             extractor = new MpegTS.BufferExtractor();
@@ -95,7 +101,7 @@ namespace MediaElementMemstream
         }
 
         bool lastFrame, foundKeyFrame, gotT0 = false;
-        private TimeSpan T0;
+        private TimeSpan Tf, T0, Tn;
         uint frameCount = 0;
         MediaStreamSample emptySample = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer(0), new TimeSpan(0));
         Stream bStream;
@@ -135,6 +141,7 @@ namespace MediaElementMemstream
 
                     if (rawSample == null)
                     {
+                        Debug.WriteLine("return empty sample.");
                         request.Sample = emptySample;
                         deferal.Complete();
 
@@ -142,23 +149,34 @@ namespace MediaElementMemstream
                     }
                 }
 
-                //if (!gotT0)
-                //{
-                //    gotT0 = true;
-                //    //T0.TotalMilliseconds = 33.3667;
-                //}
-
-                //check max size of current buffer, increase if needed.
-                if (buff.Capacity < rawSample.Length)
+                if (!gotT0)
                 {
-                    buff = new Windows.Storage.Streams.Buffer((uint)rawSample.Length);
-                    bStream.Dispose();
-                    //bStream = sample.Buffer.AsStream();
-                    bStream = buff.AsStream();
+                    gotT0 = true;
+                    //T0.TotalMilliseconds = 33.3667;
+                    Tn = T0 = TimeSpan.FromTicks(rawSample.PresentationTimeStamp*100);
                 }
 
-                //create our sample here may need to keep initial time stamp for relative time?
-                sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(T0.Ticks * frameCount));
+                //sample = GetSample(rawSample.Length);
+
+                //check max size of current buffer, increase if needed.
+                if (!foundKeyFrame)
+                {
+                    if (buff.Capacity < rawSample.Length)
+                    {
+                        buff = new Windows.Storage.Streams.Buffer((uint)rawSample.Length);
+                        bStream.Dispose();
+                        //bStream = sample.Buffer.AsStream();
+                        bStream = buff.AsStream();
+                    }
+
+                    ////create our sample here may need to keep initial time stamp for relative time?
+                    sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(Tf.Ticks * frameCount));
+                }
+                else
+                    sample = GetSample(rawSample.Length);
+
+                    bStream.Dispose();//clean up old stream 
+                bStream = sample.Buffer.AsStream();
 
                 bStream.Position = 0;
 
@@ -166,10 +184,12 @@ namespace MediaElementMemstream
                 rawSample.WriteToStream(bStream);
 
                 sample.Buffer.Length = (uint)rawSample.Length;
+                sample.DecodeTimestamp = TimeSpan.FromTicks(rawSample.PresentationTimeStamp*100);
                 Debug.WriteLine("sample length: {0}", rawSample.Length);
+                Debug.WriteLine("PTS: {0}", rawSample.PresentationTimeStamp);
                 //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
-                sample.Duration = T0;
-                sample.KeyFrame = ScanForKeyframe(bStream);//rawSample.Length > 3000;//
+                sample.Duration = sample.DecodeTimestamp - Tn;
+                sample.KeyFrame = ScanForKeyframe(bStream, sample.Buffer.Length);//rawSample.Length > 3000;//
 
                 //not sure if this is correct...
                 sample.Discontinuous = !lastFrame;
@@ -178,9 +198,12 @@ namespace MediaElementMemstream
                 //for all Mpeg packets in the sample were in order. (0-15)
                 lastFrame = rawSample.IsComplete;
 
-                    //if (!foundKeyFrame)
-                    //    sample = emptySample;
-                    //else
+                //if (!foundKeyFrame && !sample.KeyFrame)
+                //    sample = emptySample;
+                //else
+
+                Tn = sample.DecodeTimestamp;
+
                 ++frameCount;
 
                 // create the MediaStreamSample and assign to the request object. 
@@ -209,6 +232,37 @@ namespace MediaElementMemstream
             Debug.WriteLine("exit request sample");
         }
 
+        private MediaStreamSample GetSample(int length)
+        {
+            MediaStreamSample samp = null;
+
+            lock (SampleRecycler)
+                samp = SampleRecycler.FirstOrDefault(smpl => smpl.Buffer.Capacity >= length);
+
+            if(samp == null)
+            {
+                //create a new sample obj
+                samp = MediaStreamSample.CreateFromBuffer(new Windows.Storage.Streams.Buffer((uint)length),
+                                                        new TimeSpan(0));//default timespan
+
+                samp.Processed += SampleProcessed;//make sure to recycle our samples/buffers
+            }
+            else
+            {
+                lock (SampleRecycler) SampleRecycler.Remove(samp);
+            }
+
+            return samp;
+        }
+
+        private void SampleProcessed(MediaStreamSample sender, object args)
+        {
+            Debug.WriteLine("sample proc evnt");
+
+            lock (SampleRecycler)
+                SampleRecycler.Add(sender);
+        }
+
         enum NalTypes: byte
         {
             KeyFrame = 0x05,
@@ -216,7 +270,13 @@ namespace MediaElementMemstream
             PPS = 0x08,
         }
 
-        private bool ScanForKeyframe(Stream bStream)
+        /// <summary>
+        /// must provide len, since we are recycling the buffer
+        /// </summary>
+        /// <param name="bStream"></param>
+        /// <param name="length"></param>
+        /// <returns></returns>
+        private bool ScanForKeyframe(Stream bStream, uint length)
         {
             List<int> nali = new List<int>(8);
 
@@ -224,7 +284,7 @@ namespace MediaElementMemstream
 
             int b;
 
-            for(int i = 0; i<bStream.Length; ++i)
+            for(int i = 0; i<length; ++i)
             {
                 b = bStream.ReadByte();
 
@@ -256,6 +316,13 @@ namespace MediaElementMemstream
             }
 
             Debug.WriteLine("nal count: {0}", nali.Count);
+
+            //string iStr = "nal i's:";
+            System.Text.StringBuilder iStr = new System.Text.StringBuilder("nal i's:");
+            foreach (int i in nali)
+                iStr.Append(" ").Append(i).Append(",");
+
+            Debug.WriteLine(iStr.ToString());
 
             return false;
         }
@@ -302,6 +369,9 @@ namespace MediaElementMemstream
 
                     if (extractor.SampleCount > 0)
                     {
+                        //need to look for 1st key frame here before starting the decoder!
+                        //once we find the 1st kf, then we start queueing MediaSamples (not just raw samples) here
+
                         threadSync.Set();
 
                         while (extractor.SampleCount > 3)
@@ -322,6 +392,7 @@ namespace MediaElementMemstream
 
         private void initStream()
         {
+            mediaElement.RealTimePlayback = true;
 
             mediaElement.SetMediaStreamSource(mss);
         }
