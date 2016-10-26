@@ -49,6 +49,7 @@ namespace MediaElementMemstream
         private volatile bool running;
         private List<MediaStreamSample> SampleRecycler;
         //System.Collections.Concurrent.<> bag;
+        private System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample> SampleQ;
 
 
         public MainPage()
@@ -84,6 +85,7 @@ namespace MediaElementMemstream
             Tf = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
 
             SampleRecycler = new List<MediaStreamSample>(10);
+            SampleQ = new System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample>();
 
             //our demuxer
             extractor = new MpegTS.BufferExtractor();
@@ -125,29 +127,29 @@ namespace MediaElementMemstream
                 //    threadSync.WaitOne();
 
                 //dequeue the raw sample here
-                if (!foundKeyFrame)
-                {
+                //if (!foundKeyFrame)
+                //{
                     do
                     {
                         threadSync.WaitOne();
                         rawSample = extractor.DequeueNextSample(false);
                     }
                     while (rawSample == null || extractor.SampleCount == 0);
-                }
-                else 
-                {
-                    if(extractor.SampleCount > 0)
-                        rawSample = extractor.DequeueNextSample(false);
+                //}
+                //else 
+                //{
+                //    if(extractor.SampleCount > 0)
+                //        rawSample = extractor.DequeueNextSample(false);
 
-                    if (rawSample == null)
-                    {
-                        Debug.WriteLine("return empty sample.");
-                        request.Sample = emptySample;
-                        deferal.Complete();
+                //    if (rawSample == null)
+                //    {
+                //        Debug.WriteLine("return empty sample.");
+                //        request.Sample = emptySample;
+                //        deferal.Complete();
 
-                        return;
-                    }
-                }
+                //        return;
+                //    }
+                //}
 
                 if (!gotT0)
                 {
@@ -159,8 +161,8 @@ namespace MediaElementMemstream
                 //sample = GetSample(rawSample.Length);
 
                 //check max size of current buffer, increase if needed.
-                if (!foundKeyFrame)
-                {
+                //if (!foundKeyFrame)
+                //{
                     if (buff.Capacity < rawSample.Length)
                     {
                         buff = new Windows.Storage.Streams.Buffer((uint)rawSample.Length);
@@ -171,9 +173,9 @@ namespace MediaElementMemstream
 
                     ////create our sample here may need to keep initial time stamp for relative time?
                     sample = MediaStreamSample.CreateFromBuffer(buff, new TimeSpan(Tf.Ticks * frameCount));
-                }
-                else
-                    sample = GetSample(rawSample.Length);
+                //}
+                //else
+                    //sample = GetSample(rawSample.Length);
 
                     bStream.Dispose();//clean up old stream 
                 bStream = sample.Buffer.AsStream();
@@ -371,11 +373,21 @@ namespace MediaElementMemstream
                     {
                         //need to look for 1st key frame here before starting the decoder!
                         //once we find the 1st kf, then we start queueing MediaSamples (not just raw samples) here
+                        //if (!gotT0 && !foundKeyFrame)
+                        //{
+                        //    var rawSam = extractor.DequeueNextSample(false);
 
-                        threadSync.Set();
 
-                        while (extractor.SampleCount > 3)
-                            await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
+
+
+                            threadSync.Set();
+
+                        //}
+                        //else
+                        {
+                            while (extractor.SampleCount > 3)
+                                await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
+                        }
                     }
                 }
                 else
@@ -387,7 +399,11 @@ namespace MediaElementMemstream
 
         private async void button_Click(object sender, RoutedEventArgs e)
         {
+            //await Task.Run(() =>
+            //{
+            //threadSync.WaitOne();
             initStream();
+            //});
         }
 
         private void initStream()
