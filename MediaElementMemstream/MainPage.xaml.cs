@@ -49,7 +49,8 @@ namespace MediaElementMemstream
         private volatile bool running;
         private List<MediaStreamSample> SampleRecycler;
         //System.Collections.Concurrent.<> bag;
-        private System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample> SampleQ;
+        //private System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample> SampleQ;
+        Queue<MediaStreamSample> SampleQ;
 
 
         public MainPage()
@@ -85,7 +86,8 @@ namespace MediaElementMemstream
             Tf = System.TimeSpan.FromTicks((long)(ms * System.TimeSpan.TicksPerMillisecond));
 
             SampleRecycler = new List<MediaStreamSample>(10);
-            SampleQ = new System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample>();
+            SampleQ = new Queue<MediaStreamSample>();
+            //SampleQ = new System.Collections.Concurrent.ConcurrentQueue<MediaStreamSample>();
 
             //our demuxer
             extractor = new MpegTS.BufferExtractor();
@@ -177,10 +179,11 @@ namespace MediaElementMemstream
                 //else
                 bool gotSam = false;
                 MediaStreamSample s;
-                do
-                {
-                    gotSam = SampleQ.TryDequeue(out s);
-                } while (!gotSam);
+                lock (SampleQ) s = SampleQ.Dequeue();
+                //do
+                //{
+                //    gotSam = SampleQ.TryDequeue(out s);
+                //} while (!gotSam);
 
 
                 ////bStream.Dispose();//clean up old stream 
@@ -314,8 +317,8 @@ namespace MediaElementMemstream
                         if (type == NalTypes.KeyFrame)
                         {
                             bStream.Position = 0 ;
-                            var buf = new byte[bStream.Length-bStream.Position];
-                            bStream.Read(buf, 0, buf.Length);
+                            //var buf = new byte[bStream.Length-bStream.Position];
+                            //bStream.Read(buf, 0, buf.Length);
                             return true;
                         }
 
@@ -348,6 +351,7 @@ namespace MediaElementMemstream
             //_sampleGenerator.Initialize(_mss, videoDesc);
             args.Request.SetActualStartPosition(new TimeSpan(0));
         }
+        uint kfCount = 0;
 
         private async void RunreadFromFile()
         {
@@ -393,7 +397,10 @@ namespace MediaElementMemstream
                         Debug.WriteLine("sample length: {0}", rawSam.Length);
                         Debug.WriteLine("PTS: {0}", rawSam.PresentationTimeStamp);
                         //sample.DecodeTimestamp = new TimeSpan(T0.Ticks * frameCount);
-                        vidSam.Duration = vidSam.DecodeTimestamp - Tn;
+                        if (foundKeyFrame)
+                            vidSam.Duration = vidSam.DecodeTimestamp - Tn;
+                        else
+                            vidSam.Duration = Tf;
                         vidSam.KeyFrame = ScanForKeyframe(bStr, vidSam.Buffer.Length);//rawSample.Length > 3000;//
 
                         //not sure if this is correct...
@@ -416,6 +423,9 @@ namespace MediaElementMemstream
                         if (!gotT0 && !foundKeyFrame)
                         {
                             if (vidSam.KeyFrame)
+                                ++kfCount;
+
+                            if (vidSam.KeyFrame && kfCount > 4)
                             {
                                 Tn = T0 = TimeSpan.FromTicks(rawSam.PresentationTimeStamp * 100);
 
@@ -431,12 +441,22 @@ namespace MediaElementMemstream
                         }
                         else
                         {
-                            SampleQ.Enqueue(vidSam);
+                            lock(SampleQ) SampleQ.Enqueue(vidSam);
 
                             threadSync.Set();
 
-                            while (SampleQ.Count > 5)
-                                await Task.Delay(20).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
+                            int count = 0;
+
+                            lock (SampleQ) count = SampleQ.Count;
+
+                            while (count > 10)
+                            {
+                                Debug.WriteLine("samples: {0}", count);
+                                await Task.Delay(1).ConfigureAwait(false);//slow down the extractor, no need to pre-load too much
+
+                                lock (SampleQ) count = SampleQ.Count;
+
+                            }
                         }
 
                         bStr.Dispose();
